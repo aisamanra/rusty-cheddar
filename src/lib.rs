@@ -320,6 +320,8 @@ impl std::error::Error for Error {
             Level::Warning => "warning",
             Level::Note => "note",
             Level::Help => "help",
+            Level::PhaseFatal => "phase fatal",
+            Level::Cancelled => "cancelled",
         }
     }
 }
@@ -336,8 +338,9 @@ impl Error {
                 Level::Fatal => { sess.span_diagnostic.span_fatal(span, &self.message); },
                 Level::Error => { sess.span_diagnostic.span_err(span, &self.message); },
                 Level::Warning => { sess.span_diagnostic.span_warn(span, &self.message); },
-                Level::Note => { sess.span_diagnostic.span_note(span, &self.message); },
-                Level::Help => { sess.span_diagnostic.span_help(span, &self.message); },
+                Level::Note => { /* sess.span_diagnostic.span_note(span, &self.message); */ },
+                Level::Help => { /* sess.span_diagnostic.span_help(span, &self.message); */ },
+                _ => {},
             };
         } else {
             match self.level {
@@ -345,8 +348,9 @@ impl Error {
                 Level::Fatal => { sess.span_diagnostic.fatal(&self.message); },
                 Level::Error => { sess.span_diagnostic.err(&self.message); },
                 Level::Warning => { sess.span_diagnostic.warn(&self.message); },
-                Level::Note => { sess.span_diagnostic.note(&self.message); },
-                Level::Help => { sess.span_diagnostic.help(&self.message); },
+                Level::Note => { /* sess.span_diagnostic.note(&self.message); */ },
+                Level::Help => { /* sess.span_diagnostic.help(&self.message); */ },
+                _ => {},
             };
         }
     }
@@ -432,7 +436,7 @@ impl Cheddar {
             input: input,
             module: None,
             custom_code: String::new(),
-            session: syntax::parse::ParseSess::new(),
+            session: syntax::parse::ParseSess::new(syntax::codemap::FilePathMapping::empty()),
         })
     }
 
@@ -464,24 +468,25 @@ impl Cheddar {
     /// If the path is malformed (e.g. `path::to:module`).
     pub fn module(&mut self, module: &str) -> Result<&mut Cheddar, Vec<Error>> {
         // TODO: `parse_item_from_source_str` doesn't work. Why?
-        let sess = syntax::parse::ParseSess::new();
-        let mut parser = ::syntax::parse::new_parser_from_source_str(
-            &sess,
-            vec![],
-            "".into(),
-            module.into(),
-        );
+        {
+            self.session = syntax::parse::ParseSess::new(syntax::codemap::FilePathMapping::empty());
+            let mut parser = ::syntax::parse::new_parser_from_source_str(
+                &self.session,
+                "".into(),
+                module.into(),
+            );
 
-        if let Ok(path) = parser.parse_path(syntax::parse::parser::PathParsingMode::NoTypesAllowed) {
-            self.module = Some(path);
-            Ok(self)
-        } else {
-            Err(vec![Error {
-                level: Level::Fatal,
-                span: None,
-                message: format!("malformed module path `{}`", module),
-            }])
+            if let Ok(path) = parser.parse_path(syntax::parse::parser::PathStyle::Mod) {
+                self.module = Some(path);
+            } else {
+                return Err(vec![Error {
+                    level: Level::Fatal,
+                    span: None,
+                    message: format!("malformed module path `{}`", module),
+                }]);
+            }
         }
+        Ok(self)
     }
 
     /// Insert custom code before the declarations which are parsed from the Rust source.
@@ -502,21 +507,20 @@ impl Cheddar {
     pub fn compile_code(&self) -> Result<String, Vec<Error>> {
         let sess = &self.session;
         let krate = match self.input {
-            Source::File(ref path) => syntax::parse::parse_crate_from_file(path, vec![], sess),
+            Source::File(ref path) => syntax::parse::parse_crate_from_file(path, sess),
             Source::String(ref source) => syntax::parse::parse_crate_from_source_str(
                 "cheddar_source".to_owned(),
                 // TODO: this clone could be quite costly, maybe rethink this design?
                 //     or just use a slice.
                 source.clone(),
-                vec![],
                 sess,
             ),
         };
 
         if let Some(ref module) = self.module {
-            parse::parse_crate(&krate, module)
+            parse::parse_crate(&krate.unwrap(), module)
         } else {
-            parse::parse_mod(&krate.module)
+            parse::parse_mod(&krate.unwrap().module)
         }.map(|source| format!("{}\n\n{}", self.custom_code, source))
     }
 
